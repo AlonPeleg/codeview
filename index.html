@@ -296,7 +296,18 @@
     .compare-col-toolbar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; flex-shrink: 0; }
     .compare-label { font-size: 10px; text-transform: uppercase; opacity: 0.7; font-weight: 800; letter-spacing: 0.4px; }
     .compare-col .content { flex-grow: 1; position: relative; }
-    .compare-col textarea.editor-textarea { width: 100%; height: 100%; resize: none; border: none; background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 12px; padding: 8px; outline: none; line-height: 1.5; }
+    /* Compare panels host a real Monaco editor (same as the Viewer tab's edit mode) instead of a
+       plain textarea. .content already resolves a definite height via the flex chain above it, so
+       absolutely filling it (rather than relying on percentage heights) is the reliable way to give
+       Monaco's automaticLayout something concrete to measure. */
+    .compare-col .monaco-container { position: absolute; inset: 0; }
+    /* Fallback "normal editing panel" — a plain textarea, toggled in per-panel in place of Monaco.
+       No-wrap (horizontal scroll) is the default per-panel state; .wrap-on switches to soft-wrap. */
+    .compare-col .editor-textarea { position: absolute; inset: 0; width: 100%; height: 100%; resize: none; border: none; background: var(--bg); color: var(--text); font-family: var(--font-mono); font-size: 12px; padding: 8px; outline: none; line-height: 1.5; white-space: pre; overflow: auto; }
+    .compare-col .editor-textarea.wrap-on { white-space: pre-wrap; word-break: break-word; }
+    /* Stronger, more visible landing marker than Monaco's own selection highlight when a diff row
+       jump (revealComparePanelLine) lands on a line — fades out via the shared flash-pulse keyframes. */
+    .monaco-line-flash { background: rgba(14,143,217,0.35); animation: flash-pulse 0.9s ease-out; }
     .editor-mode-btn { font-size: 10px; padding: 3px 9px; white-space: nowrap; }
     /* Small "scroll to top" button floating over a long scrollable panel. Hidden until you've
        actually scrolled down, so it doesn't clutter the view when there's nothing to jump to. */
@@ -548,9 +559,13 @@
                         </div>
                         <div class="btn-delete" title="Clear Panel A" onclick="clearComparePanel('compareLeft')">×</div>
                     </div>
-                    <div class="content">
-                        <textarea class="editor-textarea" id="compareLeft" placeholder="Paste or load code into Panel A..."></textarea>
-                        <button type="button" class="scroll-top-btn" id="compareLeftScrollTop" title="Scroll to top" onclick="scrollElementToTop('compareLeft')">&#9650;</button>
+                    <div class="entry-toolbar-2">
+                        <div class="btn-icon wrap-toggle" title="Wrap long lines" onclick="toggleComparePanelWrap('compareLeft', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h11a3 3 0 0 1 0 6h-1"/><path d="M12 16l-2 2l2 2"/><path d="M4 18h4"/></svg></div>
+                        <div class="btn-icon mode-toggle" title="Switch to plain text editor" onclick="toggleComparePanelMode('compareLeft', this)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 3h12M2 6.5h12M2 10h8M2 13.5h5"/></svg></div>
+                    </div>
+                    <div class="content" id="compareLeftContentBox">
+                        <div class="monaco-container" id="monaco-compareLeft"></div>
+                        <button type="button" class="scroll-top-btn" id="compareLeftScrollTop" title="Scroll to top" onclick="scrollComparePanelToTop('compareLeft')">&#9650;</button>
                     </div>
                 </div>
                 <div class="compare-col" id="compareRightCol" ondragover="allowCompareDrop(event)" ondrop="handleCompareDrop(event,'compareRight')" ondragenter="this.classList.add('drop-target')" ondragleave="this.classList.remove('drop-target')">
@@ -569,9 +584,13 @@
                         </div>
                         <div class="btn-delete" title="Clear Panel B" onclick="clearComparePanel('compareRight')">×</div>
                     </div>
-                    <div class="content">
-                        <textarea class="editor-textarea" id="compareRight" placeholder="Paste or load code into Panel B..."></textarea>
-                        <button type="button" class="scroll-top-btn" id="compareRightScrollTop" title="Scroll to top" onclick="scrollElementToTop('compareRight')">&#9650;</button>
+                    <div class="entry-toolbar-2">
+                        <div class="btn-icon wrap-toggle" title="Wrap long lines" onclick="toggleComparePanelWrap('compareRight', this)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16"/><path d="M4 12h11a3 3 0 0 1 0 6h-1"/><path d="M12 16l-2 2l2 2"/><path d="M4 18h4"/></svg></div>
+                        <div class="btn-icon mode-toggle" title="Switch to plain text editor" onclick="toggleComparePanelMode('compareRight', this)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M2 3h12M2 6.5h12M2 10h8M2 13.5h5"/></svg></div>
+                    </div>
+                    <div class="content" id="compareRightContentBox">
+                        <div class="monaco-container" id="monaco-compareRight"></div>
+                        <button type="button" class="scroll-top-btn" id="compareRightScrollTop" title="Scroll to top" onclick="scrollComparePanelToTop('compareRight')">&#9650;</button>
                     </div>
                 </div>
             </div>
@@ -1424,6 +1443,7 @@ function onMonacoReady() {
         const it = findEntry(id);
         if (it) mountMonacoEditor(it);
     });
+    pendingComparePanelMounts.splice(0).forEach(panelId => mountComparePanelEditor(panelId));
 }
 window.onMonacoReady = onMonacoReady;
 
@@ -1612,19 +1632,29 @@ function applyMinimapForEntry(item) {
     observeMinimapResize(item);
     if (item.minimap) renderMinimap(item);
 }
-function minimapColorForCls(cls) {
-    switch (cls) {
-        case 'tok-comment': return '#6a9955';
-        case 'tok-string': return '#ce9178';
-        case 'tok-keyword': return '#569cd6';
-        case 'tok-number': return '#b5cea8';
-        case 'tok-type': return '#4ec9b0';
-        case 'tok-func': return '#dcdcaa';
-        case 'tok-tag': return '#569cd6';
-        case 'tok-key': return '#9cdcfe';
-        case 'tok-macro': return '#c586c0';
-        default: return '#d4d4d4';
-    }
+// Reads the SAME theme-aware --tok-*/--text custom properties the real syntax-highlighted code
+// uses (see the .tok-comment etc. CSS rules), rather than a fixed palette. The fixed dark-theme
+// hex values used here previously (light blue/tan/yellow, meant for a dark background) were
+// exactly what made the minimap look washed out and illegible in light theme: those pastel
+// colors have plenty of contrast on var(--bg) #1e1e1e but almost none on light theme's #ffffff.
+function getMinimapPalette() {
+    const cs = getComputedStyle(document.documentElement);
+    const v = (name, fallback) => { const val = cs.getPropertyValue(name); return val ? val.trim() || fallback : fallback; };
+    return {
+        'tok-comment': v('--tok-comment', '#6a9955'),
+        'tok-string': v('--tok-string', '#ce9178'),
+        'tok-keyword': v('--tok-keyword', '#569cd6'),
+        'tok-number': v('--tok-number', '#b5cea8'),
+        'tok-type': v('--tok-type', '#4ec9b0'),
+        'tok-func': v('--tok-func', '#dcdcaa'),
+        'tok-tag': v('--tok-tag', '#569cd6'),
+        'tok-key': v('--tok-key', '#9cdcfe'),
+        'tok-macro': v('--tok-macro', '#c586c0'),
+        'default': v('--text', '#d4d4d4')
+    };
+}
+function minimapColorForCls(cls, palette) {
+    return (cls && palette[cls]) || palette.default;
 }
 // Hand-drawn per-character rectangles (the old approach) read as a grid of little squares no
 // matter how the gap/alpha is tuned — real letterforms have curves, ascenders/descenders and
@@ -1655,6 +1685,7 @@ function buildMinimapHQCanvas(rows, cssWidth, cssHeight) {
     off.height = h;
     const octx = off.getContext('2d');
     const info = getMinimapFontInfo();
+    const palette = getMinimapPalette();
     const targetCharW = MINIMAP_CHAR_W * ss;
     const fontSize = info.baseSize * (targetCharW / info.baseCharW);
     octx.font = fontSize + 'px ' + info.family;
@@ -1683,7 +1714,7 @@ function buildMinimapHQCanvas(rows, cssWidth, cssHeight) {
                 // true length obvious at a glance; comments and other classified tokens stay a
                 // notch brighter so a run of comment lines pops as a recognizable patch.
                 octx.globalAlpha = t.cls ? 0.95 : 0.8;
-                octx.fillStyle = minimapColorForCls(t.cls);
+                octx.fillStyle = minimapColorForCls(t.cls, palette);
                 octx.fillText(t.text, x, baselineY);
             }
             x += tokenW;
@@ -2316,6 +2347,227 @@ document.addEventListener('keydown', (e) => {
 function emptyPanelState() { return { override: null, detected: detectLanguage(''), sourceEntryId: null }; }
 const comparePanels = { compareLeft: emptyPanelState(), compareRight: emptyPanelState() };
 
+/* ---------- Compare panel Monaco editors ----------
+   Panel A / Panel B are now real, freely-editable Monaco instances — the same engine and
+   options used for a snippet's edit mode in the Viewer tab (real syntax highlighting,
+   IntelliSense/suggestions, etc.) instead of plain <textarea>s. The editor/model instances
+   live here in compareEditors (keyed by panel id) rather than on comparePanels itself, since
+   comparePanels' fields (override/detected/sourceEntryId) get swapped wholesale by
+   swapComparePanels() and an editor instance is tied to its DOM host, not to "which side"
+   the data currently represents. */
+// richMode: true = Monaco ("rich"); false = the plain <textarea> fallback ("normal editing
+// panel"). wrap: whether long lines soft-wrap, independent of richMode and OFF by default (so a
+// jumped-to line lands as one full-width row instead of being split across wrapped lines, which
+// is what made a highlighted change hard to spot against long ObjectScript lines).
+const compareEditors = {
+    compareLeft: { editor: null, model: null, pendingValue: null, richMode: true, wrap: false, plainInputHandler: null, plainScrollHandler: null },
+    compareRight: { editor: null, model: null, pendingValue: null, richMode: true, wrap: false, plainInputHandler: null, plainScrollHandler: null }
+};
+const pendingComparePanelMounts = [];
+let compareSyncing = false;
+
+function getPanelCode(panelId) {
+    const ce = compareEditors[panelId];
+    if (!ce) return '';
+    if (ce.richMode) return ce.model ? ce.model.getValue() : (ce.pendingValue || '');
+    const ta = document.getElementById('plain-' + panelId);
+    return ta ? ta.value : (ce.pendingValue || '');
+}
+function setPanelCode(panelId, code) {
+    const ce = compareEditors[panelId];
+    if (!ce) return;
+    if (ce.richMode) {
+        if (ce.model) ce.model.setValue(code || '');
+        else ce.pendingValue = code || '';
+    } else {
+        const ta = document.getElementById('plain-' + panelId);
+        if (ta) ta.value = code || '';
+        else ce.pendingValue = code || '';
+    }
+}
+function wireComparePanelScrollTop(panelId) {
+    const ce = compareEditors[panelId];
+    const btn = document.getElementById(panelId + 'ScrollTop');
+    if (!ce || !ce.editor || !btn) return;
+    const update = () => btn.classList.toggle('visible', ce.editor.getScrollTop() > 40);
+    ce.editor.onDidScrollChange(update);
+    update();
+}
+function wireComparePanelScrollTopPlain(panelId) {
+    const ta = document.getElementById('plain-' + panelId);
+    const btn = document.getElementById(panelId + 'ScrollTop');
+    if (!ta || !btn) return;
+    const update = () => btn.classList.toggle('visible', ta.scrollTop > 40);
+    ta.addEventListener('scroll', update);
+    update();
+}
+function scrollComparePanelToTop(panelId) {
+    const ce = compareEditors[panelId];
+    if (!ce) return;
+    if (ce.richMode) { if (ce.editor) ce.editor.setScrollTop(0); }
+    else { const ta = document.getElementById('plain-' + panelId); if (ta) ta.scrollTo({ top: 0, behavior: 'smooth' }); }
+}
+// Sync Scroll compares scroll-ratio between the two panels regardless of which side is Monaco vs
+// the plain-textarea fallback, so the toggle keeps working across any combination of modes.
+function syncOtherPanelScroll(panelId, ratio) {
+    const otherId = panelId === 'compareLeft' ? 'compareRight' : 'compareLeft';
+    const other = compareEditors[otherId];
+    if (!other) return;
+    if (other.richMode) {
+        if (!other.editor) return;
+        const tgtMax = Math.max(0, other.editor.getScrollHeight() - other.editor.getLayoutInfo().height);
+        other.editor.setScrollTop(ratio * tgtMax);
+    } else {
+        const ta = document.getElementById('plain-' + otherId);
+        if (ta) ta.scrollTop = ratio * Math.max(0, ta.scrollHeight - ta.clientHeight);
+    }
+}
+function wireComparePanelSyncScroll(panelId) {
+    const ce = compareEditors[panelId];
+    if (!ce || !ce.editor) return;
+    ce.editor.onDidScrollChange(() => {
+        if (compareSyncing) return;
+        if (!document.getElementById('compareSyncScrollToggle').checked) return;
+        compareSyncing = true;
+        const srcMax = Math.max(1, ce.editor.getScrollHeight() - ce.editor.getLayoutInfo().height);
+        syncOtherPanelScroll(panelId, ce.editor.getScrollTop() / srcMax);
+        setTimeout(() => { compareSyncing = false; }, 20);
+    });
+}
+function wireComparePanelSyncScrollPlain(panelId) {
+    const ta = document.getElementById('plain-' + panelId);
+    if (!ta) return;
+    const handler = () => {
+        if (compareSyncing) return;
+        if (!document.getElementById('compareSyncScrollToggle').checked) return;
+        compareSyncing = true;
+        const ratio = ta.scrollTop / Math.max(1, ta.scrollHeight - ta.clientHeight);
+        syncOtherPanelScroll(panelId, ratio);
+        setTimeout(() => { compareSyncing = false; }, 20);
+    };
+    const ce = compareEditors[panelId];
+    if (ce) ce.plainScrollHandler = handler;
+    ta.addEventListener('scroll', handler);
+}
+function mountComparePanelEditor(panelId) {
+    const host = document.getElementById('monaco-' + panelId);
+    if (!host) return;
+    if (!window.monaco || !monacoReady) {
+        if (window.__monacoLoadFailed) {
+            host.innerHTML = '<div class="monaco-loading">Editor failed to load — check your connection and reload the page. Your saved code is safe.</div>';
+            return;
+        }
+        if (!pendingComparePanelMounts.includes(panelId)) pendingComparePanelMounts.push(panelId);
+        host.innerHTML = '<div class="monaco-loading">Loading editor…</div>';
+        return;
+    }
+    const ce = compareEditors[panelId];
+    const p = comparePanels[panelId];
+    const initialCode = ce.model ? ce.model.getValue() : (ce.pendingValue || '');
+    if (ce.editor) { try { ce.editor.dispose(); } catch (e) {} ce.editor = null; }
+    if (ce.model) { try { ce.model.dispose(); } catch (e) {} ce.model = null; }
+    host.innerHTML = '';
+    const effId = p.override || p.detected.id;
+    const model = monaco.editor.createModel(initialCode, getMonacoLangId(effId));
+    const editor = monaco.editor.create(host, {
+        model: model,
+        theme: (document.documentElement.getAttribute('data-theme') === 'light' ? 'vs' : 'vs-dark'),
+        automaticLayout: true,
+        minimap: { enabled: false },
+        wordWrap: ce.wrap ? 'on' : 'off',
+        stickyScroll: { enabled: false },
+        fontFamily: "'Cascadia Code', 'SF Mono', Consolas, 'Courier New', monospace",
+        fontSize: 12.5,
+        scrollBeyondLastLine: false,
+        renderWhitespace: 'selection',
+        smoothScrolling: true,
+        tabSize: 4
+    });
+    ce.editor = editor;
+    ce.model = model;
+    ce.pendingValue = null;
+    let debounceTimer = null;
+    editor.onDidChangeModelContent(() => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => refreshCompareBadge(panelId), 200);
+    });
+    wireComparePanelScrollTop(panelId);
+    wireComparePanelSyncScroll(panelId);
+}
+// Builds the plain <textarea> "normal editing panel" fallback and wires it up the same way
+// mountComparePanelEditor wires Monaco — scroll-to-top button, sync scroll, and (debounced)
+// re-detection of the language on every keystroke.
+function mountComparePlainEditor(panelId) {
+    const ta = document.getElementById('plain-' + panelId);
+    if (!ta) return;
+    ta.classList.toggle('wrap-on', !!compareEditors[panelId].wrap);
+    const debouncedRefresh = debounce(() => refreshCompareBadge(panelId), 200);
+    compareEditors[panelId].plainInputHandler = debouncedRefresh;
+    ta.addEventListener('input', debouncedRefresh);
+    wireComparePanelScrollTopPlain(panelId);
+    wireComparePanelSyncScrollPlain(panelId);
+}
+function comparePanelHostInnerHtml(panelId) {
+    const ce = compareEditors[panelId];
+    const scrollBtn = `<button type="button" class="scroll-top-btn" id="${panelId}ScrollTop" title="Scroll to top" onclick="scrollComparePanelToTop('${panelId}')">&#9650;</button>`;
+    if (ce.richMode) return `<div class="monaco-container" id="monaco-${panelId}"></div>` + scrollBtn;
+    const placeholder = panelId === 'compareLeft' ? 'Paste or load code into Panel A...' : 'Paste or load code into Panel B...';
+    return `<textarea class="editor-textarea" id="plain-${panelId}" placeholder="${placeholder}"></textarea>` + scrollBtn;
+}
+function updateComparePanelModeToggleUI(panelId) {
+    const ce = compareEditors[panelId];
+    const col = document.getElementById(panelId === 'compareLeft' ? 'compareLeftCol' : 'compareRightCol');
+    if (!col) return;
+    const btn = col.querySelector('.mode-toggle');
+    if (btn) {
+        btn.classList.toggle('toggle-active', !ce.richMode);
+        btn.title = ce.richMode ? 'Switch to plain text editor' : 'Switch to code editor (Monaco)';
+    }
+    const wrapBtn = col.querySelector('.wrap-toggle');
+    if (wrapBtn) wrapBtn.classList.toggle('toggle-active', !!ce.wrap);
+}
+function toggleComparePanelWrap(panelId, btnEl) {
+    const ce = compareEditors[panelId];
+    if (!ce) return;
+    ce.wrap = !ce.wrap;
+    if (ce.richMode) {
+        if (ce.editor) ce.editor.updateOptions({ wordWrap: ce.wrap ? 'on' : 'off' });
+    } else {
+        const ta = document.getElementById('plain-' + panelId);
+        if (ta) ta.classList.toggle('wrap-on', ce.wrap);
+    }
+    if (btnEl) btnEl.classList.toggle('toggle-active', ce.wrap);
+}
+// Toggles a single panel between the rich Monaco editor and the plain textarea "normal editing
+// panel" — content, panel name, and language override all carry over untouched either way.
+function toggleComparePanelMode(panelId) {
+    const ce = compareEditors[panelId];
+    if (!ce) return;
+    const code = getPanelCode(panelId);
+    if (ce.richMode) {
+        if (ce.editor) { try { ce.editor.dispose(); } catch (e) {} }
+        if (ce.model) { try { ce.model.dispose(); } catch (e) {} }
+        ce.editor = null; ce.model = null;
+    } else {
+        const ta = document.getElementById('plain-' + panelId);
+        if (ta && ce.plainInputHandler) ta.removeEventListener('input', ce.plainInputHandler);
+        if (ta && ce.plainScrollHandler) ta.removeEventListener('scroll', ce.plainScrollHandler);
+        ce.plainInputHandler = null; ce.plainScrollHandler = null;
+    }
+    ce.richMode = !ce.richMode;
+    ce.pendingValue = code;
+    const host = document.getElementById(panelId + 'ContentBox');
+    if (host) host.innerHTML = comparePanelHostInnerHtml(panelId);
+    if (ce.richMode) {
+        mountComparePanelEditor(panelId);
+    } else {
+        setPanelCode(panelId, code);
+        ce.pendingValue = null;
+        mountComparePlainEditor(panelId);
+    }
+    updateComparePanelModeToggleUI(panelId);
+}
+
 function renderCompareChips() {
     const box = document.getElementById('compareChips');
     if (!box) return;
@@ -2348,7 +2600,7 @@ function populateCompareSelect(panelId) {
 }
 function refreshCompareBadge(panelId) {
     const p = comparePanels[panelId];
-    const code = document.getElementById(panelId).value;
+    const code = getPanelCode(panelId);
     if (!p.override) p.detected = detectLanguage(code);
     const effId = p.override || p.detected.id;
     const lang = LANGS[effId];
@@ -2362,6 +2614,10 @@ function refreshCompareBadge(panelId) {
         : ('Auto-detected as ' + lang.label + ' (' + p.detected.confidence + ' confidence). Click to override.' + (p.detected.runnerUp ? ' Could also be ' + LANGS[p.detected.runnerUp].label + '.' : ''));
     const sel = document.getElementById(panelId + 'Select');
     sel.value = p.override || 'auto';
+    // Keep the Monaco model's grammar in sync with the (possibly just re-detected) language so
+    // the panel's coloring/IntelliSense always matches what the badge says.
+    const ce = compareEditors[panelId];
+    if (ce && ce.model && window.monaco) monaco.editor.setModelLanguage(ce.model, getMonacoLangId(effId));
 }
 function onCompareLangChange(panelId, value) {
     const p = comparePanels[panelId];
@@ -2374,12 +2630,15 @@ function loadEntryIntoPanel(entryId, panelId) {
     const p = comparePanels[panelId];
     p.override = item.override;
     p.sourceEntryId = item.id;
-    document.getElementById(panelId).value = item.rawCode;
+    setPanelCode(panelId, item.rawCode);
     document.getElementById(panelId + 'Name').value = item.name || '';
     refreshCompareBadge(panelId);
-    const ta = document.getElementById(panelId);
-    ta.classList.add('flash-active');
-    setTimeout(() => ta.classList.remove('flash-active'), 900);
+    const ce = compareEditors[panelId];
+    const flashEl = document.getElementById((ce && ce.richMode ? 'monaco-' : 'plain-') + panelId);
+    if (flashEl) {
+        flashEl.classList.add('flash-active');
+        setTimeout(() => flashEl.classList.remove('flash-active'), 900);
+    }
 }
 function allowCompareDrop(e) { e.preventDefault(); }
 function handleCompareDrop(e, panelId) {
@@ -2389,14 +2648,14 @@ function handleCompareDrop(e, panelId) {
     if (entryId) loadEntryIntoPanel(entryId, panelId);
 }
 function copyPanelRaw(panelId, btn) {
-    const code = document.getElementById(panelId).value;
+    const code = getPanelCode(panelId);
     navigator.clipboard.writeText(code).then(() => flashIcon(btn)).catch(() => {});
 }
 function copyPanelFence(panelId, btn) {
     const p = comparePanels[panelId];
     const effId = p.override || p.detected.id;
     const fenceLang = effId === 'plaintext' ? '' : effId;
-    const code = document.getElementById(panelId).value;
+    const code = getPanelCode(panelId);
     navigator.clipboard.writeText('```' + fenceLang + '\n' + code + '\n```').then(() => flashIcon(btn)).catch(() => {});
 }
 function downloadPanel(panelId) {
@@ -2405,11 +2664,11 @@ function downloadPanel(panelId) {
     const ext = LANGS[effId].ext;
     const nameInput = document.getElementById(panelId + 'Name');
     const name = (nameInput.value && nameInput.value.trim()) ? nameInput.value.trim().replace(/[\\/:*?"<>|]/g, '_') : panelId;
-    const code = document.getElementById(panelId).value;
+    const code = getPanelCode(panelId);
     triggerDownload(code, name + '.' + ext);
 }
 function savePanelToViewer(panelId, btn) {
-    const code = document.getElementById(panelId).value;
+    const code = getPanelCode(panelId);
     if (!code.trim()) { alert('Panel is empty — nothing to save.'); return; }
     const nameInput = document.getElementById(panelId + 'Name');
     const p = comparePanels[panelId];
@@ -2417,19 +2676,19 @@ function savePanelToViewer(panelId, btn) {
     flashIcon(btn);
 }
 function clearComparePanel(panelId) {
-    document.getElementById(panelId).value = '';
+    setPanelCode(panelId, '');
     document.getElementById(panelId + 'Name').value = '';
     comparePanels[panelId] = emptyPanelState();
     refreshCompareBadge(panelId);
 }
 function swapComparePanels() {
-    const lVal = document.getElementById('compareLeft').value;
-    const rVal = document.getElementById('compareRight').value;
+    const lVal = getPanelCode('compareLeft');
+    const rVal = getPanelCode('compareRight');
     const lName = document.getElementById('compareLeftName').value;
     const rName = document.getElementById('compareRightName').value;
     const lP = comparePanels.compareLeft, rP = comparePanels.compareRight;
-    document.getElementById('compareLeft').value = rVal;
-    document.getElementById('compareRight').value = lVal;
+    setPanelCode('compareLeft', rVal);
+    setPanelCode('compareRight', lVal);
     document.getElementById('compareLeftName').value = rName;
     document.getElementById('compareRightName').value = lName;
     comparePanels.compareLeft = rP; comparePanels.compareRight = lP;
@@ -2440,33 +2699,11 @@ function resetCompareSection() {
     clearComparePanel('compareRight');
     clearCompareResults();
 }
-// Generic "jump to top" for any scrollable element (the two source panels, or the diff results).
+// Generic "jump to top" for any scrollable element (currently just the diff results — the two
+// source panels are Monaco editors now and use scrollComparePanelToTop instead).
 function scrollElementToTop(id) {
     const el = document.getElementById(id);
     if (el) el.scrollTo({ top: 0, behavior: 'smooth' });
-}
-// Shows a floating scroll-to-top button only once you've actually scrolled down a bit, so it
-// doesn't sit on top of code that's already fully visible.
-function wireScrollTopButton(scrollElId, btnId, threshold) {
-    const scrollEl = document.getElementById(scrollElId);
-    const btn = document.getElementById(btnId);
-    if (!scrollEl || !btn) return;
-    const update = () => btn.classList.toggle('visible', scrollEl.scrollTop > (threshold || 40));
-    scrollEl.addEventListener('scroll', update);
-    update();
-}
-function wireSyncScroll() {
-    const l = document.getElementById('compareLeft'), r = document.getElementById('compareRight');
-    let syncing = false;
-    function sync(source, target) {
-        if (!document.getElementById('compareSyncScrollToggle').checked || syncing) return;
-        syncing = true;
-        const ratio = source.scrollTop / Math.max(1, (source.scrollHeight - source.clientHeight));
-        target.scrollTop = ratio * (target.scrollHeight - target.clientHeight);
-        setTimeout(() => { syncing = false; }, 20);
-    }
-    l.addEventListener('scroll', () => sync(l, r));
-    r.addEventListener('scroll', () => sync(r, l));
 }
 
 /* ---------- diff computation ---------- */
@@ -2531,8 +2768,8 @@ function toggleCompareDiffMode() {
 }
 function runCompare() {
     const results = document.getElementById('compareResults');
-    const codeA = document.getElementById('compareLeft').value;
-    const codeB = document.getElementById('compareRight').value;
+    const codeA = getPanelCode('compareLeft');
+    const codeB = getPanelCode('compareRight');
     if (!codeA.trim() && !codeB.trim()) { results.innerHTML = 'Load code into each panel, then click "Compare".'; lastDiffResult = null; return; }
     const opts = {
         ignoreWhitespace: document.getElementById('ignoreWhitespaceToggle').checked,
@@ -2575,8 +2812,38 @@ function renderCompareResults(diff) {
         results.appendChild(ok);
         return;
     }
+    annotateDiffAnchors(groups, filteredA, filteredB);
     if (isCompareSideMode) renderSideBySide(results, groups, filteredA, filteredB);
     else renderListView(results, groups, filteredA, filteredB);
+}
+// For every diff group, works out which original line in EACH panel it should scroll to when
+// clicked — even a pure add/remove group (which only has a line on one side) gets an anchor line
+// on the other side, so clicking it lands both panels on the same visual row instead of leaving
+// whichever side has no line of its own stuck wherever it was last scrolled. The anchor for the
+// missing side is simply the nearest surrounding line the two files do have in common (forward
+// pass, then a backward pass for a diff that starts with a pure add/remove and has nothing
+// before it yet).
+function annotateDiffAnchors(groups, filteredA, filteredB) {
+    let lastAOrig = null, lastBOrig = null;
+    groups.forEach(g => {
+        let aOrig = null, bOrig = null;
+        if (g.type === 'equal') { aOrig = filteredA[g.aIdx].orig; bOrig = filteredB[g.bIdx].orig; }
+        else if (g.type === 'changed') { aOrig = filteredA[g.removeOp.aIdx].orig; bOrig = filteredB[g.addOp.bIdx].orig; }
+        else if (g.type === 'remove') { aOrig = filteredA[g.aIdx].orig; }
+        else if (g.type === 'add') { bOrig = filteredB[g.bIdx].orig; }
+        g.anchorAOrig = aOrig != null ? aOrig : lastAOrig;
+        g.anchorBOrig = bOrig != null ? bOrig : lastBOrig;
+        if (aOrig != null) lastAOrig = aOrig;
+        if (bOrig != null) lastBOrig = bOrig;
+    });
+    let nextAOrig = null, nextBOrig = null;
+    for (let i = groups.length - 1; i >= 0; i--) {
+        const g = groups[i];
+        if (g.anchorAOrig == null) g.anchorAOrig = nextAOrig;
+        if (g.anchorBOrig == null) g.anchorBOrig = nextBOrig;
+        if (g.anchorAOrig != null) nextAOrig = g.anchorAOrig;
+        if (g.anchorBOrig != null) nextBOrig = g.anchorBOrig;
+    }
 }
 function renderCharDiffSpan(aText, bText, side) {
     const span = document.createElement('span');
@@ -2603,11 +2870,11 @@ function renderListView(container, groups, filteredA, filteredB) {
         if (g.type === 'remove') {
             icon.textContent = '-'; lnum.textContent = 'A:' + (filteredA[g.aIdx].orig + 1);
             text.textContent = filteredA[g.aIdx].text;
-            row.onclick = () => scrollTextareaToLine('compareLeft', filteredA[g.aIdx].orig);
+            row.onclick = () => jumpToDiffPair(g.anchorAOrig, g.anchorBOrig);
         } else if (g.type === 'add') {
             icon.textContent = '+'; lnum.textContent = 'B:' + (filteredB[g.bIdx].orig + 1);
             text.textContent = filteredB[g.bIdx].text;
-            row.onclick = () => scrollTextareaToLine('compareRight', filteredB[g.bIdx].orig);
+            row.onclick = () => jumpToDiffPair(g.anchorAOrig, g.anchorBOrig);
         } else if (g.type === 'changed') {
             icon.textContent = 'Δ';
             const aLine = filteredA[g.removeOp.aIdx], bLine = filteredB[g.addOp.bIdx];
@@ -2615,7 +2882,7 @@ function renderListView(container, groups, filteredA, filteredB) {
             text.appendChild(renderCharDiffSpan(aLine.text, bLine.text, 'remove'));
             text.appendChild(document.createElement('br'));
             text.appendChild(renderCharDiffSpan(aLine.text, bLine.text, 'add'));
-            row.onclick = () => { scrollTextareaToLine('compareLeft', aLine.orig); scrollTextareaToLine('compareRight', bLine.orig); };
+            row.onclick = () => jumpToDiffPair(g.anchorAOrig, g.anchorBOrig);
         }
         box.appendChild(icon); box.appendChild(lnum); box.appendChild(text);
         row.appendChild(box);
@@ -2653,16 +2920,21 @@ function appendEqualRow(grid, g, filteredA, filteredB) {
     const aLine = filteredA[g.aIdx], bLine = filteredB[g.bIdx];
     const leftCell = makeSideCell('equal', aLine.orig, document.createTextNode(aLine.text));
     const rightCell = makeSideCell('equal', bLine.orig, document.createTextNode(bLine.text));
-    leftCell.onclick = () => { setActiveSideRow(leftCell, rightCell); scrollTextareaToLine('compareLeft', aLine.orig); };
-    rightCell.onclick = () => { setActiveSideRow(leftCell, rightCell); scrollTextareaToLine('compareRight', bLine.orig); };
+    const jump = () => { setActiveSideRow(leftCell, rightCell); jumpToDiffPair(aLine.orig, bLine.orig); };
+    leftCell.onclick = jump;
+    rightCell.onclick = jump;
     pairSideCells(leftCell, rightCell);
     grid.appendChild(leftCell); grid.appendChild(rightCell);
 }
-function appendPairRow(grid, left, right) {
+// left/right may each be null (pure add/remove — the other side gets a blank filler cell), but
+// anchorAOrig/anchorBOrig are always both set (see annotateDiffAnchors) so clicking EITHER cell,
+// blank filler included, still jumps both panels to a row-aligned pair of lines.
+function appendPairRow(grid, left, right, anchorAOrig, anchorBOrig) {
     const leftCell = left ? makeSideCell(left.cls, left.orig, document.createTextNode(left.text)) : makeSideCell('blank', null, null);
     const rightCell = right ? makeSideCell(right.cls, right.orig, document.createTextNode(right.text)) : makeSideCell('blank', null, null);
-    if (left) leftCell.onclick = () => { setActiveSideRow(leftCell, rightCell); syncCompareNavToCell(leftCell); scrollTextareaToLine('compareLeft', left.orig); };
-    if (right) rightCell.onclick = () => { setActiveSideRow(leftCell, rightCell); syncCompareNavToCell(leftCell); scrollTextareaToLine('compareRight', right.orig); };
+    const jump = () => { setActiveSideRow(leftCell, rightCell); syncCompareNavToCell(leftCell); jumpToDiffPair(anchorAOrig, anchorBOrig); };
+    leftCell.onclick = jump;
+    rightCell.onclick = jump;
     pairSideCells(leftCell, rightCell);
     grid.appendChild(leftCell); grid.appendChild(rightCell);
     return { leftCell, rightCell };
@@ -2671,8 +2943,9 @@ function appendChangedRow(grid, aLine, bLine) {
     const leftCell = makeSideCell('changed-remove', aLine.orig, renderCharDiffSpan(aLine.text, bLine.text, 'remove'));
     const rightCell = makeSideCell('changed-add', bLine.orig, renderCharDiffSpan(aLine.text, bLine.text, 'add'));
     pairSideCells(leftCell, rightCell);
-    leftCell.onclick = () => { setActiveSideRow(leftCell, rightCell); syncCompareNavToCell(leftCell); scrollTextareaToLine('compareLeft', aLine.orig); };
-    rightCell.onclick = () => { setActiveSideRow(leftCell, rightCell); syncCompareNavToCell(leftCell); scrollTextareaToLine('compareRight', bLine.orig); };
+    const jump = () => { setActiveSideRow(leftCell, rightCell); syncCompareNavToCell(leftCell); jumpToDiffPair(aLine.orig, bLine.orig); };
+    leftCell.onclick = jump;
+    rightCell.onclick = jump;
     grid.appendChild(leftCell); grid.appendChild(rightCell);
     return { leftCell, rightCell };
 }
@@ -2716,12 +2989,12 @@ function renderSideBySide(container, groups, filteredA, filteredB) {
         const g = groups[i];
         if (g.type === 'remove') {
             const aOrig = filteredA[g.aIdx].orig;
-            const { leftCell, rightCell } = appendPairRow(grid, { orig: aOrig, text: filteredA[g.aIdx].text, cls: 'removed' }, null);
-            jumpTargets.push({ leftCell, rightCell, aOrig, bOrig: null });
+            const { leftCell, rightCell } = appendPairRow(grid, { orig: aOrig, text: filteredA[g.aIdx].text, cls: 'removed' }, null, g.anchorAOrig, g.anchorBOrig);
+            jumpTargets.push({ leftCell, rightCell, aOrig: g.anchorAOrig, bOrig: g.anchorBOrig });
         } else if (g.type === 'add') {
             const bOrig = filteredB[g.bIdx].orig;
-            const { leftCell, rightCell } = appendPairRow(grid, null, { orig: bOrig, text: filteredB[g.bIdx].text, cls: 'added' });
-            jumpTargets.push({ leftCell, rightCell, aOrig: null, bOrig });
+            const { leftCell, rightCell } = appendPairRow(grid, null, { orig: bOrig, text: filteredB[g.bIdx].text, cls: 'added' }, g.anchorAOrig, g.anchorBOrig);
+            jumpTargets.push({ leftCell, rightCell, aOrig: g.anchorAOrig, bOrig: g.anchorBOrig });
         } else if (g.type === 'changed') {
             const aOrig = filteredA[g.removeOp.aIdx].orig, bOrig = filteredB[g.addOp.bIdx].orig;
             const { leftCell, rightCell } = appendChangedRow(grid, filteredA[g.removeOp.aIdx], filteredB[g.addOp.bIdx]);
@@ -2834,10 +3107,75 @@ function syncCompareNavToCell(leftCell) {
     compareNavIndex = idx;
     _compareNavUpdateUI();
 }
-// Hidden div that mirrors a textarea's text layout (font, padding, wrapping) so we can
-// measure exactly where a given character offset lands vertically — a plain line-count
-// ratio breaks as soon as any line is long enough to soft-wrap onto multiple visual rows,
-// which is common in dense/minified code and was causing the jump-to-random-place bug.
+// Jumps a single compare panel to a given (0-based) original line: selects the line, scrolls it
+// into view, and briefly flashes the panel so it's obvious where you landed.
+function revealComparePanelLine(panelId, origLineIdx) {
+    const ce = compareEditors[panelId];
+    if (!ce) return;
+    if (ce.richMode) {
+        if (!ce.editor || !ce.model) return;
+        const editor = ce.editor, model = ce.model;
+        const lineNumber = Math.min(Math.max(origLineIdx + 1, 1), model.getLineCount());
+        const lineLength = model.getLineMaxColumn(lineNumber);
+        editor.focus();
+        editor.setSelection(new monaco.Range(lineNumber, 1, lineNumber, lineLength));
+        // Deliberately not revealLineInCenter(): that centers against each editor's OWN rounded
+        // "how many whole lines fit" viewport calc, so two editors jumping to a matched pair of
+        // lines could land a row apart from each other even with identical panel heights. Since
+        // Panel A and Panel B always share the same viewport height and line height, computing the
+        // scrollTop explicitly with the same formula for both guarantees they land on the exact
+        // same relative row.
+        const lineTop = editor.getTopForLineNumber(lineNumber);
+        const viewportHeight = editor.getLayoutInfo().height;
+        const lineHeight = editor.getOption(monaco.editor.EditorOption.lineHeight);
+        editor.setScrollTop(Math.max(0, lineTop - (viewportHeight - lineHeight) / 2));
+        // Monaco's own selection highlight can be subtle against syntax-colored text (especially
+        // with wrap off, where the selection is easy to lose track of on a long line), so also
+        // drop a brief, full-width background flash on that exact line.
+        const decorations = editor.createDecorationsCollection([
+            { range: new monaco.Range(lineNumber, 1, lineNumber, 1), options: { isWholeLine: true, className: 'monaco-line-flash' } }
+        ]);
+        setTimeout(() => { try { decorations.clear(); } catch (e) {} }, 900);
+    } else {
+        const ta = document.getElementById('plain-' + panelId);
+        if (!ta) return;
+        const lines = ta.value.split('\n');
+        let offset = 0;
+        for (let i = 0; i < origLineIdx && i < lines.length; i++) offset += lines[i].length + 1;
+        const lineText = lines[origLineIdx] || '';
+        ta.focus();
+        ta.setSelectionRange(offset, offset + lineText.length);
+        // Measure the real pixel position of this line by rendering everything before it (plus a
+        // zero-width marker) through a mirror element with identical text layout — a plain
+        // line-count ratio breaks as soon as any line is long enough to soft-wrap onto multiple
+        // visual rows (moot with wrap off, but the panel can still be toggled to wrap-on).
+        const mirror = getScrollMirrorDiv(ta);
+        mirror.textContent = '';
+        mirror.appendChild(document.createTextNode(ta.value.slice(0, offset)));
+        const marker = document.createElement('span');
+        marker.textContent = '​';
+        mirror.appendChild(marker);
+        const targetTop = marker.offsetTop;
+        const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
+        ta.scrollTop = Math.min(maxScroll, Math.max(0, targetTop - ta.clientHeight / 2));
+    }
+
+    const flashEl = document.getElementById(ce.richMode ? 'monaco-' + panelId : 'plain-' + panelId);
+    if (flashEl) {
+        flashEl.classList.add('flash-active');
+        setTimeout(() => flashEl.classList.remove('flash-active'), 900);
+    }
+}
+// Jumps BOTH panels together to a matched pair of original lines (either side may be null for a
+// pure add/remove — see annotateDiffAnchors, which fills in the nearest corresponding line on the
+// side that has no line of its own) so the two panels always land row-aligned on the same change,
+// not just whichever single side actually has that line.
+function jumpToDiffPair(aOrig, bOrig) {
+    if (aOrig != null) revealComparePanelLine('compareLeft', aOrig);
+    if (bOrig != null) revealComparePanelLine('compareRight', bOrig);
+}
+// Hidden div that mirrors a textarea's text layout (font, padding, wrapping) — used only by the
+// plain-textarea fallback above to measure exactly where a given character offset lands vertically.
 let _scrollMirrorDiv = null;
 function getScrollMirrorDiv(ta) {
     if (!_scrollMirrorDiv) {
@@ -2865,42 +3203,15 @@ function getScrollMirrorDiv(ta) {
     mirror.style.lineHeight = cs.lineHeight;
     mirror.style.letterSpacing = cs.letterSpacing;
     mirror.style.tabSize = cs.tabSize;
-    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.whiteSpace = ta.classList.contains('wrap-on') ? 'pre-wrap' : 'pre';
     mirror.style.wordWrap = 'break-word';
     mirror.style.overflowWrap = 'break-word';
     return mirror;
-}
-function scrollTextareaToLine(panelId, lineIdx) {
-    const ta = document.getElementById(panelId);
-    const lines = ta.value.split('\n');
-    let offset = 0;
-    for (let i = 0; i < lineIdx && i < lines.length; i++) offset += lines[i].length + 1;
-    const lineText = lines[lineIdx] || '';
-    ta.focus();
-    ta.setSelectionRange(offset, offset + lineText.length);
-
-    // Measure the real pixel position of this line by rendering everything before it
-    // (plus a zero-width marker) through a mirror element with identical text layout.
-    const mirror = getScrollMirrorDiv(ta);
-    mirror.textContent = '';
-    mirror.appendChild(document.createTextNode(ta.value.slice(0, offset)));
-    const marker = document.createElement('span');
-    marker.textContent = '​';
-    mirror.appendChild(marker);
-    const targetTop = marker.offsetTop;
-    const maxScroll = Math.max(0, ta.scrollHeight - ta.clientHeight);
-    ta.scrollTop = Math.min(maxScroll, Math.max(0, targetTop - ta.clientHeight / 3));
-
-    ta.classList.add('flash-active');
-    setTimeout(() => ta.classList.remove('flash-active'), 900);
 }
 
 /* =========================================================================
    INIT
    ========================================================================= */
-const debouncedRefreshLeft = debounce(() => refreshCompareBadge('compareLeft'), 200);
-const debouncedRefreshRight = debounce(() => refreshCompareBadge('compareRight'), 200);
-
 function init() {
     loadLayout();
     loadEntriesFromStorage();
@@ -2909,9 +3220,8 @@ function init() {
     populateCompareSelect('compareRight');
     refreshCompareBadge('compareLeft');
     refreshCompareBadge('compareRight');
-    wireSyncScroll();
-    wireScrollTopButton('compareLeft', 'compareLeftScrollTop');
-    wireScrollTopButton('compareRight', 'compareRightScrollTop');
+    mountComparePanelEditor('compareLeft');
+    mountComparePanelEditor('compareRight');
 
     const pasteZone = document.getElementById('pasteZone');
     pasteZone.addEventListener('dragover', e => { e.preventDefault(); pasteZone.classList.add('file-drop-target'); });
@@ -2924,8 +3234,6 @@ function init() {
     document.getElementById('pasteInput').addEventListener('keydown', e => {
         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addFromPasteBox(); }
     });
-    document.getElementById('compareLeft').addEventListener('input', debouncedRefreshLeft);
-    document.getElementById('compareRight').addEventListener('input', debouncedRefreshRight);
     window.addEventListener('resize', debounce(() => {
         // Fallback for browsers without ResizeObserver; the observer set up per entry (see
         // observeMinimapResize) is what normally catches focus-mode and layout-driven resizes.
@@ -2955,10 +3263,22 @@ init();
         } catch (e) {}
     }
 
+    function refreshCustomMinimaps() {
+        // The hand-rolled per-snippet minimap (view mode) bakes its token colors into an offscreen
+        // canvas from the --tok-*/--text custom properties, so switching theme needs an explicit
+        // repaint — unlike Monaco's own minimap (edit mode), which re-themes itself automatically.
+        try {
+            if (typeof postedEntries !== 'undefined' && typeof renderMinimap === 'function') {
+                postedEntries.forEach(function (item) { if (item.minimap) renderMinimap(item); });
+            }
+        } catch (e) {}
+    }
+
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-theme', theme === 'light' ? 'light' : 'dark');
         updateToggleIcon(theme);
         syncMonacoTheme(theme);
+        refreshCustomMinimaps();
     }
 
     window.toggleTheme = function () {
